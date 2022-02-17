@@ -1,0 +1,241 @@
+---
+title: "Data Exploration WQ22"
+author: "Oliver Hering"
+date: "2/13/2022"
+output: html_document
+---
+Oliver Hering 
+Data Exploration Project
+Winter 2022
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Libraries
+```{r}
+library(tidyverse)
+library(jtools)
+library(dplyr)
+library(readr)
+library(purrr)
+library(car)
+```
+
+
+# Reading in data files
+```{r}
+scorecard <- read.csv("Most+Recent+Cohorts+(Scorecard+Elements).csv", header = TRUE)
+
+id_name_link <- read.csv("id_name_link.csv", header = TRUE)
+  
+
+trends <- list.files(pattern = "trends_up_to_", full.names = TRUE) %>%
+  map_df(~read.csv(.x) %>%
+           mutate(schid = as.character(schid)))
+```
+
+
+# Linking Datasets
+```{r}
+# Linking trends data to id_name_link
+trends_id_name_link <- left_join(x = trends, y = id_name_link, by = "schname")
+
+# Linking trends data to scorecard
+fulldata <- left_join(x = trends_id_name_link, y = scorecard, by = c("unitid" = "UNITID"))
+```
+
+
+# Cleaning Dataset
+```{r}
+# Filtering only schools who predominantly grant bachelors degrees
+fulldata <- fulldata %>% filter(PREDDEG == 3)
+```
+
+```{r}
+# Removing universities that share the same name from trends data
+
+#grouping by unitid and school name
+grouped_by_school <- fulldata %>%
+  group_by(unitid, schname) %>%
+  summarise(mean(index, na.rm = TRUE))
+
+#creating n variable for each schname (should be 1 each)
+school_duplicates_n <- grouped_by_school %>%
+  group_by(schname) %>%
+  mutate(n = n())
+
+#filtering out all schools with duplicate names (n not 1)
+school_duplicate_names <- school_duplicates_n %>%
+  filter(n != 1)
+
+#removing those names from the primary data set
+fulldata <- fulldata[!(fulldata$schname %in% school_duplicate_names$schname),]
+
+
+#testing if any of the duplicate colleges still exist
+any(fulldata == 'union college')
+```
+
+
+# Analysis
+```{r}
+# creating a scorecard_released binary variable
+dates <- fulldata %>%
+  group_by(monthorweek) %>%
+  summarise(n = n())
+
+#we only want dates that are before September 2015
+dates$monthorweek
+before_scorecard_dates <- dates$monthorweek[2:128] 
+before_scorecard_dates
+
+#now we create a binary variable that is 0 when the date is before Sep. 2015 and 1 when it is after
+fulldata$scorecard_released <- ifelse(fulldata$monthorweek %in% before_scorecard_dates, 0, 1)
+
+fulldata <- fulldata %>%
+  relocate(scorecard_released, .after = monthorweek)
+```
+
+```{r}
+# creating a binary variable for if the school is low or high earnings
+
+#grouping by mean earnings for each school
+average_earnings <- fulldata %>%
+  group_by(unitid, schname) %>%
+  summarise(suppressWarnings(mean(as.numeric(md_earn_wne_p10.REPORTED.EARNINGS), na.rm = TRUE)))
+
+colnames(average_earnings)[3] <- "Average_Earnings"
+
+#calculating the median and stdev of all avg school earnings
+median_income <- median(average_earnings$Average_Earnings, na.rm = TRUE)
+stdev_income <- sd(average_earnings$Average_Earnings, na.rm = TRUE)
+
+median_income - stdev_income
+median_income + stdev_income
+
+#if the school income is below median minus 1 stdev (29,084.9), it is low earnings. 
+#if it is above median plus 1 stdev (52,715.1), it is high earnings.
+fulldata <- fulldata %>%
+  transform(md_earn_wne_p10.REPORTED.EARNINGS = as.numeric(md_earn_wne_p10.REPORTED.EARNINGS))
+
+#creating a binary variable for high_earnings
+fulldata <- fulldata %>%
+  mutate(high_earnings = case_when(
+    fulldata$md_earn_wne_p10.REPORTED.EARNINGS >= 52715.1 ~ "1",
+    fulldata$md_earn_wne_p10.REPORTED.EARNINGS <= 29084.9 ~ "0"
+  ))
+
+#relocating variables in the dataset
+fulldata <- fulldata %>%
+  relocate(md_earn_wne_p10.REPORTED.EARNINGS, .after = opeid6)
+fulldata <- fulldata %>%
+  relocate(high_earnings, .after = md_earn_wne_p10.REPORTED.EARNINGS)
+```
+
+```{r}
+# Standardizing the Index variable for each term (subtract mean and divide by stdev). This is so we can compare index for different keywords.
+fulldata <- fulldata %>%
+  group_by(schname, keyword) %>%
+  mutate(index_standardized = (index - mean(index, na.rm = TRUE)) / sd(index, na.rm = TRUE))
+
+fulldata <- fulldata %>%
+  relocate(index_standardized, .after = index)
+```
+
+
+# Graphing
+```{r}
+# How does interest change over time for low and high earning schools? Does the release of the scorecard show a discernible increase/decrease in interest?
+low_earning_schools <- subset(fulldata, high_earnings == 0)
+
+interestovertime_low <- low_earning_schools %>%
+  group_by(monthorweek, scorecard_released) %>%
+  summarise(mean(index_standardized, na.rm = TRUE))
+
+ggplot(interestovertime_low, aes(x=monthorweek, y=`mean(index_standardized, na.rm = TRUE)`)) + 
+  geom_point() + 
+  geom_vline(xintercept="2015-08-23 - 2015-08-29") +
+  ggtitle("Low Earnings Schools: Mean Standardized Interest over time")
+
+
+
+high_earning_schools <- subset(fulldata, high_earnings == 1)
+
+interestovertime_high <- high_earning_schools %>%
+  group_by(monthorweek, scorecard_released) %>%
+  summarise(mean(index_standardized, na.rm = TRUE))
+
+ggplot(interestovertime_high, aes(x=monthorweek, y=`mean(index_standardized, na.rm = TRUE)`)) + 
+  geom_point() + 
+  geom_vline(xintercept="2015-08-23 - 2015-08-29") +
+  ggtitle("High Earnings Schools: Mean Standardized Interest over time")
+```
+
+```{r}
+# How about when we plot scorecard_released on the x axis with index_standardized still on the y axis?
+
+ggplot(interestovertime_low, aes(x=scorecard_released, y=`mean(index_standardized, na.rm = TRUE)`)) +
+  geom_jitter() +
+  stat_summary(fun = "mean", geom = "crossbar",
+                 width = .8, color = "red") +
+  stat_summary(aes(label=round(..y..,2)), fun = "mean", geom="text", size=5, vjust = -1, color = 'red') +
+  ggtitle("Low Earnings Schools: \nMean Standardized Interest Index by Scorecard_Released (0 = no, 1 = yes)")
+
+
+ggplot(interestovertime_high, aes(x=scorecard_released, y=`mean(index_standardized, na.rm = TRUE)`)) +
+  geom_jitter() +
+  stat_summary(fun = "mean", geom = "crossbar",
+                 width = .8, color = "red") +
+  stat_summary(aes(label=round(..y..,2)), fun = "mean", geom="text", size=5, vjust = -1, color = 'red') +
+  ggtitle("High Earnings Schools: \nMean Standardized Interest Index by Scorecard_Released (0 = no, 1 = yes)")
+```
+
+
+# Regression
+```{r}
+# basic regressions.
+low_reg <- lm(index_standardized ~ scorecard_released, data = low_earning_schools)
+
+
+high_reg <- lm(index_standardized ~ scorecard_released, data = high_earning_schools)
+
+export_summs(low_reg, high_reg)
+```
+
+```{r}
+# one regression model with an interaction term.
+one_reg <- lm(index_standardized ~ scorecard_released*high_earnings, data = fulldata)
+export_summs(one_reg)
+export_summs(one_reg, robust = TRUE)
+```
+
+
+
+
+# Write Up
+This analysis used Google trends data, which shows popularity of a search term or keyword represented by an index value, and data from the College Scorecard, which contains information about United States colleges and the students that graduate from them. Using this data, we are investigating the following research question: Among colleges that predominantly grant bachelor's degrees, did the release of the Scorecard in September 2015 shift student interest to high-earnings colleges relative to low-earnings colleges? The Google trends interest index will be our medium of measuring interest among colleges. We are exploring this questions because we want to see if there is any correlation or association between the scorecard being released, and the interest in low or high earnings schools. This may help us better understand why people choose the schools that they do, and what the effect is of more public information about colleges.
+
+Before analysis, the Google trends data had to be aggregated into a single dataset; this is because there is a limit to the amount of requests you can make for the data. Following this, the data had to be joined with the scorecard data to so that the full dataset contained the relevant information for each school. To do this, we used the id_name_link file that allowed the school’s ID to be matched with its corresponding name. There was a small amount of cleaning that had to be done as well before beginning analysis. Mainly, schools with duplicate names had to be removed, and the data had to be filtered to include only predominantly bachelor degree granting schools. 
+
+The research question requires that we partition the data based on if the scorecard was released or not. To do this, a binary variable was created where a 0 represents the time before the scorecard was released, and a 1 is after. 
+Next, another binary variable was created representing if the school produced low earnings (0) or high earnings (1) students 10 years after graduation. To determine these levels, I used the median earnings of students working 10 years after enrollment variable for each school and took the median of those values. I used median as opposed to mean because it is less affected by outliers. Then, I incorporated the assumption that schools with earnings less than one standard deviation below the median for all schools are considered low earnings, and similar for high earnings (above the median + one standard deviation). This will allow us to examine how the scorecard’s release affected both low and high earnings colleges separately.
+Lastly, the interest index values had to be standardized. This is because the raw indices are comparable only to themselves for each keyword. To standardize, I grouped by keyword, and then took each index value, subtracted the mean of all indices for that keyword, and divided by the standard deviation. This essentially tells us how many standard deviations the difference between the observed value and the mean is, and allows the indices to be compared across all keywords. 
+
+Before moving into OLS regression analysis, I did some preliminary graphing to explore the data and attempt to get a clearer picture of what is happening. First, I wanted to see if there was any discernible pattern in the way that interest changed over time for both low and high earnings colleges. These charts are titled “Mean Standardized Interest over time”. The cyclical nature of interest is clear, and the resultant charts look similar to a sine or cosine graph. Although this pattern is somewhat satisfying, it does not relate to our research question, and even when adding a vertical line representing when the scorecard was released, there is no recognizable effect. 
+
+Next, I wanted to see how the average standardized interest appeared on a scatterplot, with the scorecard_released binary variable on the X axis. I plotted this for both low and high earning schools, and the difference in means became more visible. It’s seemingly apparent that the release of the scorecard contributed to the average interest decreasing for both subsets of schools, although the decrease appeared to be greater for high earners. To further examine this hypothesis, OLS has to be used. 
+
+I started off with basic OLS regressions; one for low earnings and one for high earnings colleges. We are using OLS because we want to see the the relationship between the scorecard being released (an independent variable), and the interest in different colleges (a dependent variable). OLS will be able to estimate what the association is between the scorecard’s release and the level of interest for both low and high earnings colleges. The output of OLS can give us insight into how interest changed after the scorecard was released for the schools relative to each other. If interest changed more for one subset than the other, we can better understand the relative impact of the scorecard. 
+
+I regressed index_standardized on scorecard_released for both subsets of schools and used export_summs to compare. According to our regression output, for low earnings schools, the release of the scorecard was associated with a 0.14 decrease in the standardized interest index value. For high earners, the release of the scorecard was associated with a 0.35 decrease in the standardized interest. Again, the standardized interest is a different measurement than the normal interest index value; standardized interest is a measure of how many standard deviations the difference between the observed value and the mean is. These coefficients may seem small, but their effect is contingent on the mean and standard deviation of each keyword's interest. For both coefficients, the p values were less than an alpha of 0.001, meaning the values are statistically significant (i.e. different than 0). Comparing these values, we can again hypothesize that the release of the scorecard had a greater negative effect for high earnings colleges relative to low earnings colleges. 
+
+I ran another regression containing an interaction term between scorecard_released and high_earnings. This tells us how different the effect of scorecard_released is when high_earnings = 1. This output showed that when the school is low earnings, the association of the scorecard_released on the interest is -0.14, same as before. When the school is high earnings and the interaction term comes into effect, the association is -0.14 + -0.21 = -0.35, also the same as before. The information gained is the same, it is just a different way of looking at it. Again, the interaction term shows us that the release of the scorecard was associated with a greater negative effect for high earning schools. I ran this regression again, except I included robust standard errors to compare the output; this had no observable effect when looking at 2 decimal places. 
+
+These regressions contained no control variables because there was no apparent variable in the data that acted as a potential backdoor between interest and scorecard_released. The scorecard was released in September 2015 regardless of any of the variables that describe the individual colleges. Nothing in the error term is related to both the scorecard being released and the interest index. 
+
+In the real world, these results suggest that the release of the scorecard shifted earnings away from both low earnings and high earnings colleges, although more so for high earnings. However, we can’t say with any certainty why this is the case; perhaps more information about smaller and lesser known schools leads recognition to shift to lower earners relative to high earners. Maybe the increased availability of information led to colleges being less appealing overall. More analysis is undoubtedly required to investigate these propositions. 
+
+This analysis has limitations like any other. A major one is that there is far more data for before the scorecard release than after. There are around 790,000 rows of data for before the release, while only 200,000 for after. With more equivalent data, the results may have varied. Additionally, there are about a quarter as many low earnings schools as there are high earnings. With a different assumption about what constitutes low vs. high earnings, these values would have been different and would have influenced the result as well. 
